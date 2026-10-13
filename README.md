@@ -42,8 +42,8 @@ Any Node host works (Render, Railway, Fly.io, a VPS). It needs a persistent disk
 | `PORT` | `4000` | Most hosts set this for you |
 | `NODE_ENV` | `production` | |
 | `DATABASE_FILE` | `/var/data/soulinspire.db` | Put it on the persistent disk and back it up |
-| `CORS_ORIGINS` | `https://soulinspire.ng,https://www.soulinspire.ng` | Storefront address(es), exact match |
-| `FRONTEND_URL` | `https://soulinspire.ng` | Where customers return after paying by card |
+| `CORS_ORIGINS` | `https://soulinspire.ng,https://www.soulinspire.com` | Storefront address(es), exact match |
+| `FRONTEND_URL` | `https://soulinspire.com` | Where customers return after paying by card |
 | `PAYSTACK_SECRET_KEY` | `sk_live_…` | Empty = demo payments |
 | `ADMIN_API_KEY` | 64 random hex characters | Empty = admin endpoints off |
 | `BANK_NAME`, `BANK_ACCOUNT_NAME`, `BANK_ACCOUNT_NUMBER` | | Shown to customers who pay by transfer |
@@ -137,7 +137,7 @@ shipped           → delivered
 Mark a bank transfer as received:
 
 ```bash
-curl -X PATCH https://api.soulinspire.ng/api/admin/orders/SI-ABCD2345 \
+curl -X PATCH https://api.soulinspire.com/api/admin/orders/SI-ABCD2345 \
   -H "Authorization: Bearer $ADMIN_API_KEY" -H "Content-Type: application/json" \
   -d '{"status":"paid"}'
 ```
@@ -145,7 +145,7 @@ curl -X PATCH https://api.soulinspire.ng/api/admin/orders/SI-ABCD2345 \
 Set a product photo:
 
 ```bash
-curl -X PATCH https://api.soulinspire.ng/api/admin/products/journal-rooted \
+curl -X PATCH https://api.soulinspire.com/api/admin/products/journal-rooted \
   -H "Authorization: Bearer $ADMIN_API_KEY" -H "Content-Type: application/json" \
   -d '{"image":"https://soulinspire.ng/products/rooted-journal.jpg"}'
 ```
