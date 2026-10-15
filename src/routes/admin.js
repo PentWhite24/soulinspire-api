@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
-import { HttpError, notFound } from "../lib/errors.js";
+import { asyncHandler, HttpError, notFound } from "../lib/errors.js";
 import { ORDER_STATUSES, productPatch, statusPatch } from "../lib/validation.js";
 
 // Store-staff endpoints. Every request needs: Authorization: Bearer <ADMIN_API_KEY>
@@ -18,35 +18,35 @@ export function adminRoutes({ orders, products, config }) {
     next();
   });
 
-  r.get("/orders", (req, res) => {
+  r.get("/orders", asyncHandler(async (req, res) => {
     const q = z.object({
       status: z.enum(ORDER_STATUSES).optional(),
       limit: z.coerce.number().int().min(1).max(200).default(50),
       offset: z.coerce.number().int().min(0).default(0),
     }).parse(req.query);
-    res.json(orders.list(q));
-  });
+    res.json(await orders.list(q));
+  }));
 
-  r.get("/orders/:orderNo", (req, res) => {
-    const order = orders.get(req.params.orderNo);
+  r.get("/orders/:orderNo", asyncHandler(async (req, res) => {
+    const order = await orders.get(req.params.orderNo);
     if (!order) throw notFound("Order");
     res.json({ order });
-  });
+  }));
 
-  r.patch("/orders/:orderNo", (req, res) => {
+  r.patch("/orders/:orderNo", asyncHandler(async (req, res) => {
     const { status } = statusPatch.parse(req.body);
-    const order = orders.setStatus(req.params.orderNo, status);
+    const order = await orders.setStatus(req.params.orderNo, status);
     if (!order) throw notFound("Order");
     res.json({ order });
-  });
+  }));
 
-  r.get("/products", (_req, res) => res.json({ products: products.list({ includeInactive: true }) }));
+  r.get("/products", asyncHandler(async (_req, res) => res.json({ products: await products.list({ includeInactive: true }) })));
 
-  r.patch("/products/:id", (req, res) => {
-    const product = products.update(req.params.id, productPatch.parse(req.body));
+  r.patch("/products/:id", asyncHandler(async (req, res) => {
+    const product = await products.update(req.params.id, productPatch.parse(req.body));
     if (!product) throw notFound("Product");
     res.json({ product });
-  });
+  }));
 
   return r;
 }
