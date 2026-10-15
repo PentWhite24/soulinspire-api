@@ -5,7 +5,7 @@ export function paymentRoutes({ orders, payments }) {
   const r = Router();
 
   async function settle(reference) {
-    const order = orders.getByRef(reference);
+    const order = await orders.getByRef(reference);
     if (!order) return null;
     if (order.status !== "pending_payment") return order;
     const result = await payments.verify(reference);
