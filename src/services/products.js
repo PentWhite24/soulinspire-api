@@ -30,39 +30,44 @@ export function toProduct(row) {
 }
 
 export function createProductService(db) {
-  const byIdStmt = db.prepare("SELECT * FROM products WHERE id = ?");
-
   return {
     categories: () => CATEGORIES,
 
-    list({ q, category, sort = "featured", includeInactive = false } = {}) {
+    async list({ q, category, sort = "featured", includeInactive = false } = {}) {
       const where = [];
-      const params = {};
+      const params = [];
       if (!includeInactive) where.push("active = 1");
-      if (category && category !== "all") { where.push("category = @category"); params.category = category; }
+      if (category && category !== "all") {
+        params.push(category);
+        where.push(`category = $${params.length}`);
+      }
       if (q) {
-        where.push("(name LIKE @q OR line LIKE @q OR description LIKE @q OR category LIKE @q)");
-        params.q = `%${q.replace(/[%_]/g, (c) => "\\" + c)}%`;
+        // Case-insensitive search; % and _ typed by the customer are matched literally.
+        params.push(`%${q.replace(/[\\%_]/g, (c) => "\\" + c)}%`);
+        const p = `$${params.length}`;
+        where.push(`(name ILIKE ${p} ESCAPE '\\' OR line ILIKE ${p} ESCAPE '\\' OR description ILIKE ${p} ESCAPE '\\' OR category ILIKE ${p} ESCAPE '\\')`);
       }
       const sql = `SELECT * FROM products ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${SORT_SQL[sort]}`;
-      return db.prepare(sql.replace(/LIKE @q/g, "LIKE @q ESCAPE '\\'")).all(params).map(toProduct);
+      const { rows } = await db.query(sql, params);
+      return rows.map(toProduct);
     },
 
-    get(id) {
-      const row = byIdStmt.get(id);
-      return row ? toProduct(row) : null;
+    async get(id) {
+      const { rows } = await db.query("SELECT * FROM products WHERE id = $1", [id]);
+      return rows[0] ? toProduct(rows[0]) : null;
     },
 
-    update(id, patch) {
+    async update(id, patch) {
       const cols = { name: "name", price: "price", stock: "stock", badge: "badge", image: "image", description: "description", line: "line", active: "active" };
       const sets = [];
-      const params = { id };
+      const params = [];
       for (const [k, v] of Object.entries(patch)) {
-        sets.push(`${cols[k]} = @${k}`);
-        params[k] = k === "active" ? (v ? 1 : 0) : v;
+        params.push(k === "active" ? (v ? 1 : 0) : v);
+        sets.push(`${cols[k]} = $${params.length}`);
       }
-      const info = db.prepare(`UPDATE products SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = @id`).run(params);
-      return info.changes ? this.get(id) : null;
+      params.push(id);
+      const { rowCount } = await db.query(`UPDATE products SET ${sets.join(", ")}, updated_at = now() WHERE id = $${params.length}`, params);
+      return rowCount ? this.get(id) : null;
     },
   };
 }
