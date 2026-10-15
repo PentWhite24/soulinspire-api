@@ -1,17 +1,31 @@
-import { test, beforeEach } from "node:test";
+import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import request from "supertest";
-import { openDatabase } from "../src/db/database.js";
+import { createPool, migrate } from "../src/db/database.js";
 import { seedProducts } from "../src/db/seed.js";
 import { createApp } from "../src/app.js";
 
 const ADMIN = "test-admin-key";
-let app, db;
+// Tests need a PostgreSQL database they are allowed to wipe. Point TEST_DATABASE_URL at it, or
+// run PostgreSQL locally with the defaults below (see README: "Run locally").
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soulinspire_test";
+
+const ADMIN = "test-admin-key";
+const db = createPool({ connectionString: TEST_DATABASE_URL, poolMax: 5 });
+let app;
+
+before(() => migrate(db));
+after(() => db.end());
+
+// Every test starts from an empty database with the starter catalogue.
+async function resetDatabase() {
+  await db.query("TRUNCATE order_items, orders, products RESTART IDENTITY CASCADE");
+  await seedProducts(db);
+}
 
 function makeApp(extra = {}) {
-  db = openDatabase(":memory:");
-  seedProducts(db);
+
   const config = {
     env: "test", corsOrigins: ["http://localhost:5173"], frontendUrl: "http://localhost:5173",
     adminApiKey: ADMIN, paystackSecretKey: "", bank: { bankName: "Test Bank", accountName: "Soulinspire Ltd", accountNumber: "0123456789" },
@@ -28,7 +42,10 @@ const order = (over = {}) => ({
   ...over,
 });
 
-beforeEach(() => { app = makeApp(); });
+beforeEach(async () => {
+  await resetDatabase();
+  app = makeApp();
+});
 
 test("health check", async () => {
   const res = await request(app).get("/api/health").expect(200);
