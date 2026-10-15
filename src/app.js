@@ -35,7 +35,20 @@ export function createApp({ db, config, fetchImpl }) {
     app.use("/api/promo", limit(20));
   }
 
+   // Load balancer health check: answers as long as the process is up. It deliberately does not
+  // touch the database, so a short database failover doesn't make every server look broken.
+  app.get("/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/health", (_req, res) => res.json({ ok: true, payments: payments.mode, time: new Date().toISOString() }));
+  // Deeper check for people and monitoring: can this server reach the database?
+  app.get("/api/ready", async (_req, res) => {
+    try {
+      await db.query("SELECT 1");
+      res.json({ ok: true, database: "reachable" });
+    } catch (err) {
+      console.error("Readiness check failed:", err.message);
+      res.status(503).json({ ok: false, database: "unreachable" });
+    }
+  });
   app.use("/api", catalogRoutes(deps));
   app.use("/api", orderRoutes(deps));
   app.use("/api/admin", adminRoutes(deps));
