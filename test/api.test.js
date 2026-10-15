@@ -53,6 +53,13 @@ test("health check", async () => {
   assert.equal(res.body.payments, "demo");
 });
 
+test("load balancer health check and database readiness", async () => {
+  const res = await request(app).get("/health").expect(200);
+  assert.equal(res.body.ok, true);
+  const ready = await request(app).get("/api/ready").expect(200);
+  assert.equal(ready.body.database, "reachable");
+});
+
 test("lists, filters and sorts products", async () => {
   const all = await request(app).get("/api/products").expect(200);
   assert.equal(all.body.products.length, 12);
