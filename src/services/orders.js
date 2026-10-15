@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { HttpError } from "../lib/errors.js";
 import { computeTotals, estimateDelivery, findPromo, ZONES } from "../lib/pricing.js";
 import { normalisePhone } from "../lib/validation.js";
+import { transaction } from "../db/database.js";
 
 // Allowed status changes. Anything else is rejected.
 const TRANSITIONS = {
@@ -20,28 +21,32 @@ function newOrderNo() {
   return "SI-" + Array.from(bytes, (b) => ALPHABET[b % ALPHABET.length]).join("");
 }
 
-export function createOrderService(db) {
-  const stmts = {
-    product: db.prepare("SELECT id, name, price, stock, sizes, active FROM products WHERE id = ?"),
-    takeStock: db.prepare("UPDATE products SET stock = stock - @qty, updated_at = datetime('now') WHERE id = @id AND stock >= @qty"),
-    returnStock: db.prepare("UPDATE products SET stock = stock + @qty, updated_at = datetime('now') WHERE id = @id"),
-    insertOrder: db.prepare(`INSERT INTO orders (order_no, idempotency_key, status, customer_name, phone, email, ship_method, zone, address, city,
-      pay_method, notes, promo_code, subtotal, discount, delivery, vat, total, eta)
-      VALUES (@orderNo, @idempotencyKey, @status, @name, @phone, @email, @ship, @zone, @address, @city, @pay, @notes, @promo,
-      @subtotal, @discount, @delivery, @vat, @total, @eta)`),
-    insertItem: db.prepare(`INSERT INTO order_items (order_id, product_id, name, size, unit_price, qty, line_total)
-      VALUES (@orderId, @productId, @name, @size, @unitPrice, @qty, @lineTotal)`),
-    byNo: db.prepare("SELECT * FROM orders WHERE order_no = ?"),
-    byKey: db.prepare("SELECT * FROM orders WHERE idempotency_key = ?"),
-    byRef: db.prepare("SELECT * FROM orders WHERE payment_ref = ?"),
-    items: db.prepare("SELECT product_id, name, size, unit_price, qty, line_total FROM order_items WHERE order_id = ? ORDER BY id"),
-    setStatus: db.prepare("UPDATE orders SET status = @status, updated_at = datetime('now'), paid_at = CASE WHEN @status = 'paid' THEN datetime('now') ELSE paid_at END WHERE id = @id"),
-    setRef: db.prepare("UPDATE orders SET payment_ref = ?, updated_at = datetime('now') WHERE id = ?"),
-    staleUnpaid: db.prepare("SELECT id FROM orders WHERE status = 'pending_payment' AND created_at < datetime('now', ?)"),
-  };
+const SQL = {
+  product: "SELECT id, name, price, stock, sizes, active FROM products WHERE id = $1",
+  takeStock: "UPDATE products SET stock = stock - $2, updated_at = now() WHERE id = $1 AND stock >= $2",
+  returnStock: "UPDATE products SET stock = stock + $2, updated_at = now() WHERE id = $1",
+  insertOrder: `INSERT INTO orders (order_no, idempotency_key, status, customer_name, phone, email, ship_method, zone, address, city,
+    pay_method, notes, promo_code, subtotal, discount, delivery, vat, total, eta)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id`,
+  insertItem: `INSERT INTO order_items (order_id, product_id, name, size, unit_price, qty, line_total)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+  byNo: "SELECT * FROM orders WHERE order_no = $1",
+  byNoForUpdate: "SELECT * FROM orders WHERE order_no = $1 FOR UPDATE",
+  byIdForUpdate: "SELECT * FROM orders WHERE id = $1 FOR UPDATE",
+  byKey: "SELECT * FROM orders WHERE idempotency_key = $1",
+  byRef: "SELECT * FROM orders WHERE payment_ref = $1",
+  items: "SELECT product_id, name, size, unit_price, qty, line_total FROM order_items WHERE order_id = $1 ORDER BY id",
+  setStatus: "UPDATE orders SET status = $2, updated_at = now(), paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END WHERE id = $1",
+  setRef: "UPDATE orders SET payment_ref = $1, updated_at = now() WHERE id = $2",
+  staleUnpaid: "SELECT id FROM orders WHERE status = 'pending_payment' AND created_at < now() - make_interval(mins => $1)",
+};
 
+const one = async (q, sql, params) => (await q.query(sql, params)).rows[0];
+const isUniqueViolation = (err, constraint) => err?.code === "23505" && (!constraint || err.constraint === constraint);
+
+export function createOrderService(db) {
   /** Resolves cart lines against the catalogue and checks stock. Throws 409 with details if anything is unavailable. */
-  function priceLines(items) {
+  async function priceLines(q, items) {
     // Merge duplicate lines (same product and size).
     const merged = new Map();
     for (const it of items) {
@@ -52,7 +57,7 @@ export function createOrderService(db) {
     const problems = [];
     const lines = [];
     for (const it of merged.values()) {
-      const p = stmts.product.get(it.productId);
+      const p = await one(q, SQL.product, [it.productId]);
       if (!p || !p.active) { problems.push({ productId: it.productId, reason: "unavailable" }); continue; }
       const sizes = p.sizes ? JSON.parse(p.sizes) : null;
       if (sizes && !sizes.includes(it.size)) { problems.push({ productId: p.id, reason: "size_required", sizes }); continue; }
@@ -70,7 +75,8 @@ export function createOrderService(db) {
     return lines;
   }
 
-  function serialise(row) {
+  async function serialise(q, row) {
+    const { rows: items } = await q.query(SQL.items, [row.id]);
     return {
       orderNo: row.order_no,
       status: row.status,
@@ -79,27 +85,34 @@ export function createOrderService(db) {
       payment: { method: row.pay_method, reference: row.payment_ref, paidAt: row.paid_at },
       promoCode: row.promo_code,
       notes: row.notes,
-      items: stmts.items.all(row.id).map((i) => ({ productId: i.product_id, name: i.name, size: i.size, unitPrice: i.unit_price, qty: i.qty, lineTotal: i.line_total })),
+      items: items.map((i) => ({ productId: i.product_id, name: i.name, size: i.size, unitPrice: i.unit_price, qty: i.qty, lineTotal: i.line_total })),
       totals: { subtotal: row.subtotal, discount: row.discount, delivery: row.delivery, vat: row.vat, total: row.total },
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
   }
 
-  const changeStatus = db.transaction((row, status) => {
+  /** Changes the status of an order row that the caller has locked (SELECT ... FOR UPDATE). */
+  async function changeStatus(client, row, status) {
     if (row.status === status) return;
     if (!TRANSITIONS[row.status].includes(status)) {
       throw new HttpError(409, "invalid_transition", `An order that is ${row.status.replace("_", " ")} can't be marked ${status.replace("_", " ")}.`);
     }
     if (status === "cancelled") {
-      for (const it of stmts.items.all(row.id)) stmts.returnStock.run({ id: it.product_id, qty: it.qty });
+      const { rows: items } = await client.query(SQL.items, [row.id]);
+      for (const it of items) await client.query(SQL.returnStock, [it.product_id, it.qty]);
     }
-    stmts.setStatus.run({ id: row.id, status });
-  });
+    await client.query(SQL.setStatus, [row.id, status]);
+  }
+
+  async function findByKey(idempotencyKey) {
+    const row = await one(db, SQL.byKey, [idempotencyKey]);
+    return row ? { order: await serialise(db, row), created: false } : null;
+  }
 
   return {
-    quote({ items, delivery = {}, promoCode }) {
-      const lines = priceLines(items);
+    async quote({ items, delivery = {}, promoCode }) {
+      const lines = await priceLines(db, items);
       const promo = findPromo(promoCode);
       if (promoCode && !promo) throw new HttpError(400, "invalid_promo", "That promo code isn't valid.");
       const totals = computeTotals(lines, { promo, zone: delivery.zone || "lagos", ship: delivery.method || "std" });
@@ -107,79 +120,102 @@ export function createOrderService(db) {
     },
 
     /** Creates an order and reserves stock in one transaction. Same idempotency key returns the same order. */
-    create: db.transaction((input, { idempotencyKey } = {}) => {
+    async create(input, { idempotencyKey } = {}) {
       if (idempotencyKey) {
-        const existing = stmts.byKey.get(idempotencyKey);
-        if (existing) return { order: serialise(existing), created: false };
+        const existing = await findByKey(idempotencyKey);
+        if (existing) return existing;
       }
       const promo = findPromo(input.promoCode);
       if (input.promoCode && !promo) throw new HttpError(400, "invalid_promo", "That promo code isn't valid.");
 
-      const lines = priceLines(input.items);
-      const { method: ship, zone } = input.delivery;
-      const totals = computeTotals(lines, { promo, zone, ship });
+      try {
+        return await transaction(db, async (client) => {
+          const lines = await priceLines(client, input.items);
+          const { method: ship, zone } = input.delivery;
+          const totals = computeTotals(lines, { promo, zone, ship });
 
-      for (const l of lines) {
-        const ok = stmts.takeStock.run({ id: l.productId, qty: l.qty }).changes === 1;
-        if (!ok) throw new HttpError(409, "cart_unavailable", "Some items in your bag just sold out.", [{ productId: l.productId, reason: "insufficient_stock" }]);
+          // Each UPDATE only succeeds if enough stock is left, even with several servers taking orders at once.
+          for (const l of lines) {
+            const { rowCount } = await client.query(SQL.takeStock, [l.productId, l.qty]);
+            if (rowCount !== 1) throw new HttpError(409, "cart_unavailable", "Some items in your bag just sold out.", [{ productId: l.productId, reason: "insufficient_stock" }]);
+          }
+
+          const status = { card: "pending_payment", transfer: "awaiting_transfer", pod: "confirmed" }[input.payment.method];
+          const orderNo = newOrderNo();
+          const { id: orderId } = await one(client, SQL.insertOrder, [
+            orderNo, idempotencyKey || null, status,
+            input.customer.name, normalisePhone(input.customer.phone), input.customer.email,
+            ship, zone,
+            ship === "pickup" ? null : input.delivery.address,
+            ship === "pickup" ? null : input.delivery.city,
+            input.payment.method, input.notes || null, promo?.code || null,
+            totals.subtotal, totals.discount, totals.delivery, totals.vat, totals.total,
+            estimateDelivery({ zone, ship }),
+          ]);
+          for (const l of lines) {
+            await client.query(SQL.insertItem, [orderId, l.productId, l.name, l.size, l.unitPrice, l.qty, l.lineTotal]);
+          }
+          return { order: await serialise(client, await one(client, SQL.byNo, [orderNo])), created: true };
+        });
+      } catch (err) {
+        // Two requests with the same key arrived together and the other one won: return its order.
+        if (idempotencyKey && isUniqueViolation(err, "orders_idempotency_key_key")) {
+          const existing = await findByKey(idempotencyKey);
+          if (existing) return existing;
+        }
+        throw err;
       }
+    },
 
-      const status = { card: "pending_payment", transfer: "awaiting_transfer", pod: "confirmed" }[input.payment.method];
-      const orderNo = newOrderNo();
-      const { lastInsertRowid } = stmts.insertOrder.run({
-        orderNo, idempotencyKey: idempotencyKey || null, status,
-        name: input.customer.name, phone: normalisePhone(input.customer.phone), email: input.customer.email,
-        ship, zone,
-        address: ship === "pickup" ? null : input.delivery.address,
-        city: ship === "pickup" ? null : input.delivery.city,
-        pay: input.payment.method, notes: input.notes || null, promo: promo?.code || null,
-        ...totals,
-        eta: estimateDelivery({ zone, ship }),
+    async get(orderNo) {
+      const row = await one(db, SQL.byNo, [orderNo]);
+      return row ? serialise(db, row) : null;
+    },
+
+    async getByRef(reference) {
+      const row = await one(db, SQL.byRef, [reference]);
+      return row ? serialise(db, row) : null;
+    },
+
+    async setPaymentRef(orderNo, reference) {
+      const row = await one(db, SQL.byNo, [orderNo]);
+      await db.query(SQL.setRef, [reference, row.id]);
+    },
+
+    async setStatus(orderNo, status) {
+      const found = await transaction(db, async (client) => {
+        // FOR UPDATE: if the webhook and a customer's browser confirm the same payment at once, they take turns.
+        const row = await one(client, SQL.byNoForUpdate, [orderNo]);
+        if (!row) return false;
+        await changeStatus(client, row, status);
+        return true;
       });
-      for (const l of lines) stmts.insertItem.run({ orderId: lastInsertRowid, ...l });
-      return { order: serialise(stmts.byNo.get(orderNo)), created: true };
-    }),
-
-    get(orderNo) {
-      const row = stmts.byNo.get(orderNo);
-      return row ? serialise(row) : null;
+      return found ? this.get(orderNo) : null;
     },
 
-    getByRef(reference) {
-      const row = stmts.byRef.get(reference);
-      return row ? serialise(row) : null;
-    },
-
-    setPaymentRef(orderNo, reference) {
-      const row = stmts.byNo.get(orderNo);
-      stmts.setRef.run(reference, row.id);
-    },
-
-    setStatus(orderNo, status) {
-      const row = stmts.byNo.get(orderNo);
-      if (!row) return null;
-      changeStatus(row, status);
-      return serialise(stmts.byNo.get(orderNo));
-    },
-
-    list({ status, limit = 50, offset = 0 } = {}) {
-      const rows = status
-        ? db.prepare("SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?").all(status, limit, offset)
-        : db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT ? OFFSET ?").all(limit, offset);
-      const total = status
-        ? db.prepare("SELECT COUNT(*) n FROM orders WHERE status = ?").get(status).n
-        : db.prepare("SELECT COUNT(*) n FROM orders").get().n;
-      return { orders: rows.map(serialise), total };
+    async list({ status, limit = 50, offset = 0 } = {}) {
+      const where = status ? "WHERE status = $1" : "";
+      const filter = status ? [status] : [];
+      const n = filter.length;
+      const { rows } = await db.query(`SELECT * FROM orders ${where} ORDER BY id DESC LIMIT $${n + 1} OFFSET $${n + 2}`, [...filter, limit, offset]);
+      const { rows: [{ total }] } = await db.query(`SELECT COUNT(*) AS total FROM orders ${where}`, filter);
+      return { orders: await Promise.all(rows.map((r) => serialise(db, r))), total };
     },
 
     /** Cancels card orders that were never paid, releasing their stock. Returns how many were cancelled. */
-    expireUnpaid(minutes) {
-      const stale = stmts.staleUnpaid.all(`-${minutes} minutes`);
+    async expireUnpaid(minutes) {
+      const { rows: stale } = await db.query(SQL.staleUnpaid, [minutes]);
+      let cancelled = 0;
       for (const { id } of stale) {
-        const row = db.prepare("SELECT * FROM orders WHERE id = ?").get(id);
-        changeStatus(row, "cancelled");
+        // Every server runs this sweep; the row lock and status re-check make sure stock is returned only once.
+        cancelled += await transaction(db, async (client) => {
+          const row = await one(client, SQL.byIdForUpdate, [id]);
+          if (row?.status !== "pending_payment") return 0;
+          await changeStatus(client, row, "cancelled");
+          return 1;
+        });
       }
-      return stale.length;
+      return cancelled;
     },
   };
 }
