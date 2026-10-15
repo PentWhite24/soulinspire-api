@@ -15,27 +15,27 @@ export function orderRoutes({ orders, payments, config }) {
   });
 
   // Prices a bag without placing an order.
-  r.post("/orders/quote", (req, res) => {
-    res.json(orders.quote(quoteInput.parse(req.body)));
-  });
+  r.post("/orders/quote", asyncHandler(async (req, res) => {
+    res.json(await orders.quote(quoteInput.parse(req.body)));
+  }));
 
   r.post(
     "/orders",
     asyncHandler(async (req, res) => {
       const input = orderInput.parse(req.body);
       const idempotencyKey = req.get("Idempotency-Key")?.slice(0, 100);
-      const { order, created } = orders.create(input, { idempotencyKey });
+      const { order, created } = await orders.create(input, { idempotencyKey });
 
       const next = { method: order.payment.method };
       if (order.payment.method === "card" && order.status === "pending_payment") {
         try {
           const init = await payments.initialize({ orderNo: order.orderNo, email: order.customer.email, amountNaira: order.totals.total });
-          orders.setPaymentRef(order.orderNo, init.reference);
+          await orders.setPaymentRef(order.orderNo, init.reference);
           next.reference = init.reference;
           next.authorizationUrl = init.authorizationUrl;
         } catch (err) {
           console.error(err);
-          orders.setStatus(order.orderNo, "cancelled"); // release the reserved stock
+          await orders.setStatus(order.orderNo, "cancelled"); // release the reserved stock
           throw new HttpError(502, "payment_unavailable", "We couldn't start the card payment. Please try again or choose bank transfer.");
         }
       }
@@ -44,17 +44,17 @@ export function orderRoutes({ orders, payments, config }) {
       }
       if (order.delivery.method === "pickup") next.pickup = config.pickup;
 
-      res.status(created ? 201 : 200).json({ order: orders.get(order.orderNo), payment: next });
+      res.status(created ? 201 : 200).json({ order: await orders.get(order.orderNo), payment: next });
     })
   );
 
   // Order lookup for customers. The email must match so order numbers can't be guessed.
-  r.get("/orders/:orderNo", (req, res) => {
+  r.get("/orders/:orderNo", asyncHandler(async (req, res) => {
     const email = String(req.query.email || "").trim().toLowerCase();
-    const order = orders.get(req.params.orderNo);
+    const order = await orders.get(req.params.orderNo);
     if (!order || !email || order.customer.email !== email) throw notFound("Order");
     res.json({ order });
-  });
+  }));
 
   return r;
 }
