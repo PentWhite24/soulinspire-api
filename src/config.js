@@ -5,7 +5,18 @@ const env = process.env;
 export const config = {
   env: env.NODE_ENV || "development",
   port: Number(env.PORT || 4000),
-  databaseFile: env.DATABASE_FILE || "data/soulinspire.db",
+  // PostgreSQL. Either DATABASE_URL, or the separate DB_* settings (what the servers' boot script writes).
+  db: {
+    connectionString: env.DATABASE_URL || "",
+    host: env.DB_HOST || "localhost",
+    port: Number(env.DB_PORT || 5432),
+    database: env.DB_NAME || "soulinspire",
+    user: env.DB_USER || "postgres",
+    password: env.DB_PASSWORD || "",
+    ssl: env.DB_SSL === "true",
+    sslCaFile: env.DB_SSL_CA || "",
+    poolMax: Number(env.DB_POOL_MAX || 10),
+  },
   // Comma-separated list of storefront origins allowed to call the API from a browser.
   corsOrigins: (env.CORS_ORIGINS || "http://localhost:5173").split(",").map((s) => s.trim()).filter(Boolean),
   // Where the customer is sent back to after paying by card.
