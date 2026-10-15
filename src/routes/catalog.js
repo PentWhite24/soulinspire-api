@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { notFound } from "../lib/errors.js";
+import { asyncHandler, notFound } from "../lib/errors.js";
 import { FREE_DELIVERY_OVER, POD_ZONES, VAT_RATE, ZONES } from "../lib/pricing.js";
 import { productQuery } from "../lib/validation.js";
 import { INTENTIONS } from "../db/catalog.js";
@@ -7,17 +7,17 @@ import { INTENTIONS } from "../db/catalog.js";
 export function catalogRoutes({ products, config }) {
   const r = Router();
 
-  r.get("/products", (req, res) => {
+  r.get("/products", asyncHandler(async (req, res) => {
     const query = productQuery.parse(req.query);
     res.set("Cache-Control", "public, max-age=30");
-    res.json({ products: products.list(query) });
-  });
+    res.json({ products: await products.list(query) });
+  }));
 
-  r.get("/products/:id", (req, res) => {
-    const p = products.get(req.params.id);
+  r.get("/products/:id", asyncHandler(async (req, res) => {
+    const p = await products.get(req.params.id);
     if (!p || p.active === false) throw notFound("Product");
     res.json({ product: p });
-  });
+  }));
 
   r.get("/categories", (_req, res) => res.json({ categories: products.categories() }));
 
